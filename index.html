@@ -449,7 +449,7 @@
         // Mouse wheel for zoom
         function onMouseWheel(event) {
             const zoomSpeed = 5;
-            camera.position.z -= event.deltaY * 0.05 * zoomSpeed;
+            camera.position.z += event.deltaY * 0.05 * zoomSpeed;
             camera.position.z = Math.max(150, Math.min(450, camera.position.z));
         }
 
