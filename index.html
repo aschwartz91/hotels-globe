@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Globe Visualization</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/topojson/3.0.2/topojson.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            background: linear-gradient(135deg, #101010 0%, #1a1a1a 100%);
+            overflow: hidden;
+            position: relative;
+        }
+        
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+        
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #FBFBF5;
+            z-index: 100;
+            background: rgba(16, 16, 16, 0.9);
+            padding: 20px;
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(188, 231, 244, 0.3);
+            max-width: 300px;
+        }
+        
+        #info h1 {
+            font-size: 24px;
+            margin-bottom: 10px;
+            color: #BCE7F4;
+            font-weight: 600;
+        }
+        
+        #info p {
+            font-size: 14px;
+            color: #FBFBF5;
+            line-height: 1.5;
+            margin-bottom: 10px;
+        }
+        
+        #city-count {
+            font-size: 18px;
+            color: #BCE7F4;
+            font-weight: 500;
+        }
+        
+        #tooltip {
+            position: absolute;
+            background: rgba(16, 16, 16, 0.95);
+            color: #FBFBF5;
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-size: 14px;
+            pointer-events: none;
+            z-index: 1000;
+            display: none;
+            border: 1px solid #BCE7F4;
+            backdrop-filter: blur(10px);
+        }
+        
+        #controls {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: #FBFBF5;
+            z-index: 100;
+            background: rgba(16, 16, 16, 0.9);
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 12px;
+            border: 1px solid rgba(188, 231, 244, 0.3);
+            backdrop-filter: blur(10px);
+        }
+        
+        .control-hint {
+            margin-bottom: 5px;
+            color: #BCE7F4;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+    <div id="info">
+        <h1>Used by Hotels Around the World</h1>
+        <!--<p></p>-->
+        <div id="city-count">Loading cities...</div>
+    </div>
+    <div id="controls">
+        <div class="control-hint">🖱️ Drag to rotate</div>
+        <div class="control-hint">📍 Hover for details</div>
+        <div class="control-hint">⚡ Scroll to zoom</div>
+    </div>
+    <div id="tooltip"></div>
+    
+    <script>
+        // Initialize Three.js scene
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(
+            45,
+            window.innerWidth / window.innerHeight,
+            0.1,
+            1000
+        );
+        
+        const renderer = new THREE.WebGLRenderer({ 
+            antialias: true,
+            alpha: true 
+        });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio || 1);
+        renderer.setClearColor(0x000000, 0);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        // Globe settings
+        const GLOBE_RADIUS = 100;
+        const CITY_POINT_SIZE = 1.5;
+        
+        // Create globe with atmosphere effect
+        const globeGeometry = new THREE.SphereGeometry(GLOBE_RADIUS, 64, 64);
+        const globeMaterial = new THREE.ShaderMaterial({
+            vertexShader: `
+                varying vec3 vNormal;
+                varying vec2 vUv;
+                void main() {
+                    vNormal = normalize(normalMatrix * normal);
+                    vUv = uv;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                varying vec3 vNormal;
+                varying vec2 vUv;
+                void main() {
+                    // Subtle, neutral-dark appearance
+                    float intensity = pow(0.65 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.0);
+                    vec3 atmosphere = vec3(0.24, 0.26, 0.28) * pow(intensity, 1.5) * 0.15;
+                    
+                    // Base color with very subtle gradient
+                    vec3 baseColor = vec3(0.10, 0.10, 0.11);
+                    vec3 color = baseColor + atmosphere;
+                    
+                    // Very soft rim lighting to avoid "orb" look
+                    float rimIntensity = 1.0 - max(dot(vNormal, vec3(0.0, 0.0, 1.0)), 0.0);
+                    rimIntensity = pow(rimIntensity, 2.0);
+                    color += vec3(0.24, 0.26, 0.28) * rimIntensity * 0.08;
+                    
+                    gl_FragColor = vec4(color, 1.0);
+                }
+            `,
+            transparent: false,
+            side: THREE.FrontSide
+        });
+        const globe = new THREE.Mesh(globeGeometry, globeMaterial);
+        scene.add(globe);
+
+        // Add graticule (lat/lon grid)
+        const graticuleGroup = new THREE.Group();
+        
+        // Latitude lines
+        for (let lat = -80; lat <= 80; lat += 20) {
+            const points = [];
+            for (let lon = -180; lon <= 180; lon += 5) {
+                const phi = (90 - lat) * Math.PI / 180;
+                const theta = (lon + 180) * Math.PI / 180;
+                const x = GLOBE_RADIUS * Math.sin(phi) * Math.cos(theta);
+                const y = GLOBE_RADIUS * Math.cos(phi);
+                const z = GLOBE_RADIUS * Math.sin(phi) * Math.sin(theta);
+                points.push(new THREE.Vector3(-x, y, z));
+            }
+            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+            const material = new THREE.LineBasicMaterial({
+                color: 0xBCE7F4,
+                transparent: true,
+                opacity: 0.1
+            });
+            const line = new THREE.Line(geometry, material);
+            graticuleGroup.add(line);
+        }
+        
+        // Longitude lines
+        for (let lon = -180; lon <= 180; lon += 20) {
+            const points = [];
+            for (let lat = -90; lat <= 90; lat += 5) {
+                const phi = (90 - lat) * Math.PI / 180;
+                const theta = (lon + 180) * Math.PI / 180;
+                const x = GLOBE_RADIUS * Math.sin(phi) * Math.cos(theta);
+                const y = GLOBE_RADIUS * Math.cos(phi);
+                const z = GLOBE_RADIUS * Math.sin(phi) * Math.sin(theta);
+                points.push(new THREE.Vector3(-x, y, z));
+            }
+            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+            const material = new THREE.LineBasicMaterial({
+                color: 0xBCE7F4,
+                transparent: true,
+                opacity: 0.1
+            });
+            const line = new THREE.Line(geometry, material);
+            graticuleGroup.add(line);
+        }
+        
+        scene.add(graticuleGroup);
+
+        // Fetch and render world map outline
+        fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json')
+            .then(response => response.json())
+            .then(topology => {
+                const land = topojson.feature(topology, topology.objects.land);
+                const landGroup = new THREE.Group();
+                landGroup.name = 'land';
+                
+                // Draw land boundaries
+                land.features.forEach(feature => {
+                    if (feature.geometry.type === 'Polygon') {
+                        drawPolygon(feature.geometry.coordinates, landGroup);
+                    } else if (feature.geometry.type === 'MultiPolygon') {
+                        feature.geometry.coordinates.forEach(polygon => {
+                            drawPolygon(polygon, landGroup);
+                        });
+                    }
+                });
+                
+                scene.add(landGroup);
+            })
+            .catch(error => {
+                console.log('Could not load world map, continuing without it');
+            });
+        
+        function drawPolygon(coordinates, group) {
+            coordinates.forEach(ring => {
+                const points = [];
+                ring.forEach(coord => {
+                    const lon = coord[0];
+                    const lat = coord[1];
+                    const phi = (90 - lat) * Math.PI / 180;
+                    const theta = (lon + 180) * Math.PI / 180;
+                    const x = GLOBE_RADIUS * 1.001 * Math.sin(phi) * Math.cos(theta);
+                    const y = GLOBE_RADIUS * 1.001 * Math.cos(phi);
+                    const z = GLOBE_RADIUS * 1.001 * Math.sin(phi) * Math.sin(theta);
+                    points.push(new THREE.Vector3(-x, y, z));
+                });
+                
+                if (points.length > 1) {
+                    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                    const material = new THREE.LineBasicMaterial({
+                        color: 0xBCE7F4,
+                        transparent: true,
+                        opacity: 0.3
+                    });
+                    const line = new THREE.Line(geometry, material);
+                    group.add(line);
+                }
+            });
+        }
+
+        // City data with coordinates
+        const cities = [
+            {name: "Chicago", country: "United States", lat: 41.8781, lon: -87.6298},
+            {name: "New York", country: "United States", lat: 40.7128, lon: -74.0060},
+            {name: "Washington", country: "United States", lat: 38.9072, lon: -77.0369},
+            {name: "Nashville", country: "United States", lat: 36.1627, lon: -86.7816},
+            {name: "Dallas", country: "United States", lat: 32.7767, lon: -96.7970},
+            {name: "Paris", country: "France", lat: 48.8566, lon: 2.3522},
+            {name: "San Francisco", country: "United States", lat: 37.7749, lon: -122.4194},
+            {name: "Miami", country: "United States", lat: 25.7617, lon: -80.1918},
+            {name: "Los Angeles", country: "United States", lat: 34.0522, lon: -118.2437},
+            {name: "Atlanta", country: "United States", lat: 33.7490, lon: -84.3880},
+            {name: "Boston", country: "United States", lat: 42.3601, lon: -71.0589},
+            {name: "Portland", country: "United States", lat: 45.5152, lon: -122.6784},
+            {name: "Tokyo", country: "Japan", lat: 35.6762, lon: 139.6503},
+            {name: "Seoul", country: "South Korea", lat: 37.5665, lon: 126.9780},
+            {name: "Shanghai", country: "China", lat: 31.2304, lon: 121.4737},
+            {name: "Barcelona", country: "Spain", lat: 41.3851, lon: 2.1734},
+            {name: "Singapore", country: "Singapore", lat: 1.3521, lon: 103.8198},
+            {name: "Sydney", country: "Australia", lat: -33.8688, lon: 151.2093},
+            {name: "London", country: "United Kingdom", lat: 51.5074, lon: -0.1278},
+            {name: "Madrid", country: "Spain", lat: 40.4168, lon: -3.7038},
+            {name: "Milan", country: "Italy", lat: 45.4642, lon: 9.1900},
+            {name: "Dubai", country: "United Arab Emirates", lat: 25.2048, lon: 55.2708},
+            {name: "Hong Kong", country: "Hong Kong SAR China", lat: 22.3193, lon: 114.1694},
+            {name: "Bangkok", country: "Thailand", lat: 13.7563, lon: 100.5018},
+            {name: "Amsterdam", country: "Netherlands", lat: 52.3676, lon: 4.9041},
+            {name: "Rome", country: "Italy", lat: 41.9028, lon: 12.4964},
+            {name: "Toronto", country: "Canada", lat: 43.6532, lon: -79.3832},
+            {name: "Vienna", country: "Austria", lat: 48.2082, lon: 16.3738},
+            {name: "Dublin", country: "Ireland", lat: 53.3498, lon: -6.2603},
+            {name: "Copenhagen", country: "Denmark", lat: 55.6761, lon: 12.5683},
+            {name: "Zurich", country: "Switzerland", lat: 47.3769, lon: 8.5417},
+            {name: "Berlin", country: "Germany", lat: 52.5200, lon: 13.4050},
+            {name: "Athens", country: "Greece", lat: 37.9838, lon: 23.7275},
+            {name: "Stockholm", country: "Sweden", lat: 59.3293, lon: 18.0686},
+            {name: "Helsinki", country: "Finland", lat: 60.1699, lon: 24.9384},
+            {name: "Lisbon", country: "Portugal", lat: 38.7223, lon: -9.1393},
+            {name: "Prague", country: "Czech Republic", lat: 50.0755, lon: 14.4378},
+            {name: "Budapest", country: "Hungary", lat: 47.4979, lon: 19.0402},
+            {name: "Warsaw", country: "Poland", lat: 52.2297, lon: 21.0122},
+            {name: "Brussels", country: "Belgium", lat: 50.8503, lon: 4.3517},
+            {name: "Mumbai", country: "India", lat: 19.0760, lon: 72.8777},
+            {name: "Jakarta", country: "Indonesia", lat: -6.2088, lon: 106.8456},
+            {name: "Manila", country: "Philippines", lat: 14.5995, lon: 120.9842},
+            {name: "Kuala Lumpur", country: "Malaysia", lat: 3.1390, lon: 101.6869},
+            {name: "Cape Town", country: "South Africa", lat: -33.9249, lon: 18.4241},
+            {name: "Cairo", country: "Egypt", lat: 30.0444, lon: 31.2357},
+            {name: "Nairobi", country: "Kenya", lat: -1.2921, lon: 36.8219},
+            {name: "Buenos Aires", country: "Argentina", lat: -34.6037, lon: -58.3816},
+            {name: "São Paulo", country: "Brazil", lat: -23.5505, lon: -46.6333},
+            {name: "Mexico City", country: "Mexico", lat: 19.4326, lon: -99.1332},
+            {name: "Lima", country: "Peru", lat: -12.0464, lon: -77.0428},
+            {name: "Montreal", country: "Canada", lat: 45.5017, lon: -73.5673},
+            {name: "Vancouver", country: "Canada", lat: 49.2827, lon: -123.1207},
+            {name: "Melbourne", country: "Australia", lat: -37.8136, lon: 144.9631},
+            {name: "Auckland", country: "New Zealand", lat: -36.8485, lon: 174.7633},
+            {name: "Tel Aviv", country: "Israel", lat: 32.0853, lon: 34.7818},
+            {name: "Istanbul", country: "Turkey", lat: 41.0082, lon: 28.9784},
+            {name: "Moscow", country: "Russia", lat: 55.7558, lon: 37.6173},
+            {name: "Reykjavik", country: "Iceland", lat: 64.1466, lon: -21.9426},
+            {name: "Edinburgh", country: "United Kingdom", lat: 55.9533, lon: -3.1883},
+            {name: "Phoenix", country: "United States", lat: 33.4484, lon: -112.0740},
+            {name: "Denver", country: "United States", lat: 39.7392, lon: -104.9903},
+            {name: "Seattle", country: "United States", lat: 47.6062, lon: -122.3321},
+            {name: "Austin", country: "United States", lat: 30.2672, lon: -97.7431},
+            {name: "Houston", country: "United States", lat: 29.7604, lon: -95.3698},
+            {name: "Las Vegas", country: "United States", lat: 36.1699, lon: -115.1398},
+            {name: "San Diego", country: "United States", lat: 32.7157, lon: -117.1611},
+            {name: "Philadelphia", country: "United States", lat: 39.9526, lon: -75.1652},
+            {name: "Orlando", country: "United States", lat: 28.5383, lon: -81.3792},
+            {name: "Tampa", country: "United States", lat: 27.9506, lon: -82.4572}
+        ];
+
+        // Update city count
+        document.getElementById('city-count').textContent = `${cities.length}+ Cities Worldwide`;
+
+        // Add city markers
+        const cityGroup = new THREE.Group();
+        const cityMeshes = [];
+        
+        cities.forEach(city => {
+            // Convert lat/lon to 3D coordinates
+            const phi = (90 - city.lat) * Math.PI / 180;
+            const theta = (city.lon + 180) * Math.PI / 180;
+            const x = GLOBE_RADIUS * Math.sin(phi) * Math.cos(theta);
+            const y = GLOBE_RADIUS * Math.cos(phi);
+            const z = GLOBE_RADIUS * Math.sin(phi) * Math.sin(theta);
+
+            // Create glowing point
+            const dotGeometry = new THREE.SphereGeometry(CITY_POINT_SIZE, 8, 8);
+            const dotMaterial = new THREE.MeshBasicMaterial({
+                color: 0xFBFBF5,
+                transparent: true,
+                opacity: 0.9
+            });
+            const dot = new THREE.Mesh(dotGeometry, dotMaterial);
+            dot.position.set(-x * 1.01, y * 1.01, z * 1.01);
+            dot.userData = { name: city.name, country: city.country };
+            cityMeshes.push(dot);
+            cityGroup.add(dot);
+
+            // Removed pulse ring to eliminate outer stroke
+        });
+
+        scene.add(cityGroup);
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0x404040, 1);
+        scene.add(ambientLight);
+        
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+        directionalLight.position.set(5, 3, 5);
+        scene.add(directionalLight);
+
+        // Camera setup
+        camera.position.set(0, 0, 350);
+
+        // Mouse controls
+        let isDragging = false;
+        let previousMousePosition = { x: 0, y: 0 };
+        const rotationSpeed = { x: 0, y: 0 };
+        const targetRotation = { x: 0.25, y: 0.5 };
+        
+        // Raycaster for hover detection
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        let isHoveringCity = false;
+
+        function onMouseMove(event) {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            if (isDragging) {
+                const deltaMove = {
+                    x: event.clientX - previousMousePosition.x,
+                    y: event.clientY - previousMousePosition.y
+                };
+
+                targetRotation.x -= deltaMove.y * 0.005;
+                targetRotation.y += deltaMove.x * 0.005;
+
+                previousMousePosition = {
+                    x: event.clientX,
+                    y: event.clientY
+                };
+            }
+
+            // Check for hover
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(cityMeshes);
+            
+            const tooltip = document.getElementById('tooltip');
+            if (intersects.length > 0) {
+                const city = intersects[0].object.userData;
+                tooltip.innerHTML = `<strong>${city.name}</strong><br>${city.country}`;
+                tooltip.style.display = 'block';
+                tooltip.style.left = event.clientX + 10 + 'px';
+                tooltip.style.top = event.clientY - 30 + 'px';
+                isHoveringCity = true;
+            } else {
+                tooltip.style.display = 'none';
+                isHoveringCity = false;
+            }
+        }
+
+        function onMouseDown(event) {
+            isDragging = true;
+            previousMousePosition = {
+                x: event.clientX,
+                y: event.clientY
+            };
+        }
+
+        function onMouseUp() {
+            isDragging = false;
+        }
+
+        // Mouse wheel for zoom
+        function onMouseWheel(event) {
+            const zoomSpeed = 5;
+            camera.position.z += event.deltaY * 0.05 * zoomSpeed;
+            camera.position.z = Math.max(150, Math.min(450, camera.position.z));
+        }
+
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mousedown', onMouseDown);
+        document.addEventListener('mouseup', onMouseUp);
+        document.addEventListener('wheel', onMouseWheel);
+
+        // Set initial tilt so Northern Hemisphere is more prominent
+        globe.rotation.x = targetRotation.x;
+        globe.rotation.y = targetRotation.y;
+        graticuleGroup.rotation.x = targetRotation.x;
+        graticuleGroup.rotation.y = targetRotation.y;
+        cityGroup.rotation.x = targetRotation.x;
+        cityGroup.rotation.y = targetRotation.y;
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Auto-rotate if not dragging and not hovering a city pin
+            if (!isDragging && !isHoveringCity) {
+                targetRotation.y += 0.001;
+            }
+
+            // Smooth rotation
+            globe.rotation.x += (targetRotation.x - globe.rotation.x) * 0.1;
+            globe.rotation.y += (targetRotation.y - globe.rotation.y) * 0.1;
+            graticuleGroup.rotation.x = globe.rotation.x;
+            graticuleGroup.rotation.y = globe.rotation.y;
+            cityGroup.rotation.x = globe.rotation.x;
+            cityGroup.rotation.y = globe.rotation.y;
+            
+            if (scene.getObjectByName('land')) {
+                const land = scene.getObjectByName('land');
+                land.rotation.x = globe.rotation.x;
+                land.rotation.y = globe.rotation.y;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // Handle resize
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        window.addEventListener('resize', onWindowResize);
+
+        // Start animation
+        animate();
+    </script>
+</body>
+</html>
