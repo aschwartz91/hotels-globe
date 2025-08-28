@@ -442,7 +442,7 @@
                     y: event.clientY - previousMousePosition.y
                 };
 
-                targetRotation.x -= deltaMove.y * 0.005;
+                targetRotation.x += deltaMove.y * 0.005;  // Fixed: now matches Google Maps drag direction
                 targetRotation.y += deltaMove.x * 0.005;
 
                 previousMousePosition = {
