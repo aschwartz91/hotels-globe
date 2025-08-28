@@ -130,6 +130,7 @@
         // Globe settings
         const GLOBE_RADIUS = 100;
         const CITY_POINT_SIZE = 1.05;
+        const HIT_AREA_SIZE = 4.0;  // Larger invisible spheres for easier interaction
         
         // Create globe with atmosphere effect
         const globeGeometry = new THREE.SphereGeometry(GLOBE_RADIUS, 64, 64);
@@ -369,6 +370,7 @@
         // Add city markers
         const cityGroup = new THREE.Group();
         const cityMeshes = [];
+        const cityHitAreas = [];  // Invisible larger spheres for hit detection
         
         cities.forEach(city => {
             // Convert lat/lon to 3D coordinates
@@ -387,9 +389,21 @@
             });
             const dot = new THREE.Mesh(dotGeometry, dotMaterial);
             dot.position.set(-x * 1.01, y * 1.01, z * 1.01);
-            dot.userData = { name: city.name, country: city.country };
             cityMeshes.push(dot);
             cityGroup.add(dot);
+
+            // Create invisible hit area (larger sphere for easier interaction)
+            const hitAreaGeometry = new THREE.SphereGeometry(HIT_AREA_SIZE, 8, 8);
+            const hitAreaMaterial = new THREE.MeshBasicMaterial({
+                transparent: true,
+                opacity: 0,  // Completely invisible
+                visible: false  // Don't render at all
+            });
+            const hitArea = new THREE.Mesh(hitAreaGeometry, hitAreaMaterial);
+            hitArea.position.set(-x * 1.01, y * 1.01, z * 1.01);
+            hitArea.userData = { name: city.name, country: city.country };
+            cityHitAreas.push(hitArea);
+            cityGroup.add(hitArea);
 
             // Removed pulse ring to eliminate outer stroke
         });
@@ -437,9 +451,9 @@
                 };
             }
 
-            // Check for hover
+            // Check for hover (use hit areas for easier targeting)
             raycaster.setFromCamera(mouse, camera);
-            const intersects = raycaster.intersectObjects(cityMeshes);
+            const intersects = raycaster.intersectObjects(cityHitAreas);
             
             const tooltip = document.getElementById('tooltip');
             if (intersects.length > 0) {
